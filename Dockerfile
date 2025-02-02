@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1
+
 # Compile the web vault using docker
 # Usage:
 #    Quick and easy:
@@ -15,59 +17,42 @@
 #    Note: you can use --build-arg to specify the version to build:
 #    docker build -t web_vault_build --build-arg VAULT_VERSION=main .
 
-FROM node:18-bookworm as build
+FROM node:20-bookworm AS build
 RUN node --version && npm --version
-
-# Prepare the folder to enable non-root, otherwise npm will refuse to run the postinstall
-RUN mkdir /vault
-RUN chown node:node /vault
-USER node
 
 # Can be a tag, release, but prefer a commit hash because it's not changeable
 # https://github.com/bitwarden/clients/commit/${VAULT_VERSION}
 #
-# Using https://github.com/bitwarden/clients/releases/tag/web-v2024.3.1
-ARG VAULT_VERSION=60e47aff88024ba9aad1a4ed7b63690b968bf7fc
+# Using https://github.com/bitwarden/clients/releases/tag/web-v2025.1.1
+ARG VAULT_VERSION=06b60c6853dc6c510eaf5ee68d547d02baee8934
+ENV VAULT_VERSION=$VAULT_VERSION
+ENV VAULT_FOLDER=bw_clients
+ENV CHECKOUT_TAGS=false
 
-WORKDIR /vault
-RUN git -c init.defaultBranch=main init && \
-    git remote add origin https://github.com/bitwarden/clients.git && \
-    git fetch --depth 1 origin "${VAULT_VERSION}" && \
-    git -c advice.detachedHead=false checkout FETCH_HEAD
+RUN mkdir /bw_web_builds
+WORKDIR /bw_web_builds
 
-COPY --chown=node:node patches /patches
-COPY --chown=node:node resources /resources
-COPY --chown=node:node scripts/apply_patches.sh /apply_patches.sh
+COPY patches ./patches
+COPY resources ./resources
+COPY scripts ./scripts
+# Use a glob pattern here so builds will continue even if the `.build_env` does not exists
+COPY .build_env* ./
 
-RUN bash /apply_patches.sh
+RUN ./scripts/checkout_web_vault.sh
+RUN ./scripts/patch_web_vault.sh
+RUN ./scripts/build_web_vault.sh
+RUN mv "${VAULT_FOLDER}/apps/web/build" ./web-vault
 
-# Build
-RUN npm ci
-
-# Switch to the web apps folder
-WORKDIR /vault/apps/web
-
-RUN npm run dist:oss:selfhost
-
-RUN printf '{"version":"%s"}' \
-      $(git -c 'versionsort.suffix=-' ls-remote --tags --refs --sort='v:refname' https://github.com/dani-garcia/bw_web_builds.git 'v*' | tail -n1 | grep -Eo '[^\/v]*$') \
-      > build/vw-version.json
-
-# Delete debugging map files, optional
-# RUN find build -name "*.map" -delete
-
-# Prepare the final archives
-RUN mv build web-vault
 RUN tar -czvf "bw_web_vault.tar.gz" web-vault --owner=0 --group=0
-
 # Output the sha256sum here so people are able to match the sha256sum from the CI with the assets and the downloaded version if needed
-RUN echo "sha256sum: $(sha256sum "bw_web_vault.tar.gz")"
+RUN echo "sha256sum: $(sha256sum bw_web_vault.tar.gz)"
 
 # We copy the final result as a separate empty image so there's no need to download all the intermediate steps
 # The result is included both uncompressed and as a tar.gz, to be able to use it in the docker images and the github releases directly
 FROM scratch
 # hadolint ignore=DL3010
-COPY --from=build /vault/apps/web/bw_web_vault.tar.gz /bw_web_vault.tar.gz
-COPY --from=build /vault/apps/web/web-vault /web-vault
+COPY --from=build /bw_web_builds/bw_web_vault.tar.gz /bw_web_vault.tar.gz
+COPY --from=build /bw_web_builds/web-vault /web-vault
+
 # Added so docker create works, can't actually run a scratch image
 CMD [""]
